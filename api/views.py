@@ -4,15 +4,20 @@ import time
 import pandas as pd
 import sqlite3
 
-from gevent.pywsgi import WSGIServer
-from geventwebsocket.handler import WebSocketHandler
+import gevent
 from flask import Flask, render_template, redirect, url_for, request, session, jsonify
 from flask_cors import CORS
+from flask_sockets import Sockets
+
+from api.models.train_maze import ValueIterTrainer, SarsaLambdaTrainer
 
 app = Flask(__name__)
 app.config.from_object(__name__)
 app.secret_key = 'hoge'
 CORS(app)
+sockets = Sockets(app)
+
+trainer = None
 
 @app.route('/', methods=['GET'])
 def root():
@@ -22,32 +27,62 @@ def root():
 def login():
     data = json.loads(request.data.decode('utf-8'))
     conn = sqlite3.connect('api/static/aaa.sqlite3')
-    result_table = pd.read_sql_query('SELECT * FROM registration reg where reg.name = "{}";'.format(data['user_name']), conn)
-    result_table = result_table.query('password == "{}"'.format(data['password']))
+
+    sql_command = f"""
+    SELECT
+        *
+    FROM REGISTRATIOJ
+    WHERE
+        NAME = '{data['user_name']}' AND
+        PASSWORD = 'data['password']'
+    """
+    result_table = pd.read_sql_query(sql=sql_command, con=conn)
     if len(result_table) > 0:
         expire = int((datetime.datetime.now() + datetime.timedelta(days=1)).timestamp())
-        return jsonify({
+        json_data = {
             'token': True,
             'name': data['user_name'],
             'expire': expire
-        })
+        }
+        return jsonify(json_data)
+
     else:
-        return jsonify({
+        json_data = {
             'token': False,
             'name': 'Guest',
             'expire': 0
-        })
+        }
 
-if __name__ == '__main__':
-    app.debug = True
+    return jsonify(json_data)
 
-    host = '0.0.0.0'
-    port = 8889
-    host_port = (host, port)
+def create_trainer(data):
+    if data['algorithm'] == 'valueiter':
+        return ValueIterTrainer(
+            iter_count=2000,
+        )
+    elif data['algorithm'] == 'sarsalambda':
+        return SarsaLambdaTrainer(
+            alpha=0.1,
+            gamma=0.95,
+            epsilon=0.1,
+            lambda_value=0.2,
+            iter_count=2000,
+        )
 
-    server = WSGIServer(
-        host_port,
-        app,
-        handler_class=WebSocketHandler
-    )
-    server.serve_forever()
+@sockets.route('/train_maze')
+def train_maze(ws):
+    ws.send(json.dumps({'status': 'start_connection'}))
+    while not ws.closed:
+        gevent.sleep(0.1)
+        message = ws.receive()
+        if message:
+            recieved = json.loads(message)
+            if recieved['status'] == 'initialize_trainer':
+                trainer = create_trainer(recieved['config'])
+                ws.send(json.dumps({'status': 'trainer_construction'}))
+            elif recieved['status'] == 'trainer_run':
+                result = trainer.run()
+                ws.send(json.dumps({
+                    'status': 'step_maze',
+                    'maze_color': result,
+                }))
